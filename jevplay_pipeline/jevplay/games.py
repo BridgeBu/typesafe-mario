@@ -248,3 +248,5 @@ SuperMarioBros.summary = _smb_summary
 from .smb import SMB  # noqa: E402
 ADAPTERS["smb"] = SMB
 ADAPTERS["smb_v1"] = SuperMarioBros
+from .contra import Contra  # noqa: E402
+ADAPTERS["contra"] = Contra

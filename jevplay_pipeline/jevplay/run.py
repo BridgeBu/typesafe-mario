@@ -49,16 +49,26 @@ def render(game, frame, dec, idx, reward_total, status, cfg):
         d.text((x, 140), "waiting for first decision...", font=F_MED, fill=DIM); return img
     d.text((x, 136), dec.action.replace("_", " "), font=F_ACT, fill=TXT)
     why = game.options.get(dec.action, "")
-    d.text((x, 196), why[:62] + ("..." if len(why) > 62 else ""), font=F_XS, fill=DIM)
-    d.line([x, 236, R, 236], fill=LINE)
+    lines, cur = [], ""
+    for w in why.split():  # word-wrap the reason to at most 2 lines that fit the sidebar
+        if d.textlength((cur + " " + w).strip(), font=F_XS) <= R - x:
+            cur = (cur + " " + w).strip()
+        else:
+            lines.append(cur); cur = w
+    lines.append(cur)
+    if len(lines) > 2:
+        lines = lines[:2]; lines[1] = lines[1].rstrip(".,") + "…"
+    for k, ln in enumerate(lines):
+        d.text((x, 192 + 23 * k), ln, font=F_XS, fill=DIM)
+    d.line([x, 244, R, 244], fill=LINE)
     for i, (k, v) in enumerate([("Confidence", f"{dec.confidence*100:.0f}%"),
                                 ("Latency", f"{dec.latency_ms:.0f} ms"),
                                 ("Reward", "—" if reward_total is None else f"{reward_total:+.1f}")]):
         cx = x + i * 196
-        d.text((cx, 252), k, font=F_XS, fill=DIM); d.text((cx, 280), v, font=F_MED, fill=TXT)
-    d.line([x, 330, R, 330], fill=LINE)
-    d.text((x, 344), "Controller probabilities", font=F_SM, fill=TXT)
-    y = 384
+        d.text((cx, 258), k, font=F_XS, fill=DIM); d.text((cx, 284), v, font=F_MED, fill=TXT)
+    d.line([x, 332, R, 332], fill=LINE)
+    d.text((x, 346), "Controller probabilities", font=F_SM, fill=TXT)
+    y = 388
     for name in game.options:
         p = dec.probabilities.get(name, 0.0); ch = name == dec.action
         d.text((x, y), name.replace("_", " "), font=F_XS, fill=TXT if ch else DIM)

@@ -16,10 +16,11 @@ class Contra:
         "aim_down_right_fire": "Run right firing diagonally down-right at targets below.",
         "stand_fire": "Stand still and fire forward.",
         "run_left_fire": "Back off to the left while firing.",
+        "drop_down": "Drop down through the ledge you are standing on (down + jump) to a lower level.",
     }
     BTN = {"run_right_fire": RIGHT, "jump_right_fire": RIGHT | A, "prone_fire": DOWN,
            "aim_up_right_fire": UP | RIGHT, "aim_down_right_fire": DOWN | RIGHT, "stand_fire": 0,
-           "run_left_fire": LEFT}
+           "run_left_fire": LEFT, "drop_down": DOWN | A}
     instructions = {
         "question": "Which controller action should the commando take next to push right through the stage, "
                     "destroying enemies, without getting hit?",
@@ -27,7 +28,7 @@ class Contra:
                   "memory values; one hit kills the player.",
         "rules": [
             "Each option carries an `emulator_preview`: the exact outcome from the real game engine for the next "
-            "~1 s. Never pick an option whose preview says the PLAYER DIES when another option survives.",
+            "~2 s. Never pick an option whose preview says the PLAYER DIES when another option survives.",
             "Among surviving options prefer the one that progresses right and destroys enemies (score gain).",
         ],
     }
@@ -50,6 +51,7 @@ class Contra:
             frame, *_ = env.step(START if i % 30 < 2 else 0)
             if env.ram[0x2C] == 4 and i > 100:
                 break
+        self._lvl0 = int(env.ram[0x30])
         while env.ram[0x90] != 1:
             frame, *_ = env.step(0)
         for _ in range(int(getattr(self, "boot_delay", 0))):
@@ -57,7 +59,8 @@ class Contra:
         return frame
 
     def _score(self, r):
-        return int(r[0x07E0]) | (int(r[0x07E1]) << 8)  # raw score counter (monotonic)
+        # verified empirically: 0x7E2/0x7E3 = P1 score / 100, little-endian (+1 per 100-pt soldier)
+        return (int(r[0x07E2]) | (int(r[0x07E3]) << 8)) * 100
 
     def info(self, r):
         return {"progress": int(r[0x64]) * 256 + int(r[0x65]) + int(r[0x334]), "x": int(r[0x334]),
@@ -73,7 +76,7 @@ class Contra:
                 b = (btn & ~A) | fire
             yield b
 
-    def _preview(self, env, first, then, frames=60):
+    def _preview(self, env, first, then, frames=120):
         env._backup()
         try:
             i0 = self.info(env.ram); n = 0
@@ -95,13 +98,20 @@ class Contra:
         finally:
             env._restore()
 
+    FOLLOW = ("run_right_fire", "jump_right_fire", "prone_fire", "stand_fire", "run_left_fire", "drop_down")
+
+    @staticmethod
+    def _rank(p):
+        return (not p["dies"], p["frames"] if p["dies"] else 0, p["progress_px"] + p["score_gain"] / 10)
+
     def read_state(self, env, frame):
         r = env.ram; i = self.info(r)
         pv = {}
         for a in self.options:
             keep = self._preview(env, a, a)
-            run = self._preview(env, a, "run_right_fire")
-            pv[a] = {"keep_doing_this": keep, "then_run_right": run}
+            alts = {t: (keep if t == a else self._preview(env, a, t)) for t in self.FOLLOW}
+            bt = max(alts, key=lambda t: self._rank(alts[t]))
+            pv[a] = {"keep_doing_this": keep, "then_run_right": dict(alts[bt], then=bt)}
         self._pv = pv
         self._facts = {"player": {"screen_x": i["x"], "screen_y": i["y"], "lives": i["lives"]},
                        "progress": {"level_progress_px": i["progress"], "score_counter": i["score"]},
@@ -114,13 +124,13 @@ class Contra:
             k, t = self._pv[a]["keep_doing_this"], self._pv[a]["then_run_right"]
             txt = lambda p: ("PLAYER DIES after %d frames" % p["frames"]) if p["dies"] else \
                 ("survives, %+d px, score +%d" % (p["progress_px"], p["score_gain"]))
-            out[a] = {"action": desc, "emulator_preview": "doing this for 1 s: " + txt(k) +
-                      "; doing this once then running right: " + txt(t)}
+            out[a] = {"action": desc, "emulator_preview": "doing this for 2 s: " + txt(k) +
+                      f"; doing this once then the best follow-up ({t['then']}): " + txt(t)}
         return out
 
     def heuristic(self, s, opts):
         pv = s["facts"]["previews"]; sc = {o: 0.05 for o in opts}
-        best = max(opts, key=lambda a: (not pv[a]["then_run_right"]["dies"], pv[a]["then_run_right"]["progress_px"]))
+        best = max(opts, key=lambda a: self._rank(pv[a]["then_run_right"]))
         sc[best] += 1
         return sc
 
@@ -131,10 +141,10 @@ class Contra:
         return float(d)
 
     def done(self, env):
-        return int(env.ram[0x38]) == 1  # game over
+        return int(env.ram[0x38]) == 1 or int(env.ram[0x30]) != getattr(self, "_lvl0", 0)  # game over / stage clear
 
     def died(self, env):
-        return self.info(env.ram)["dead"]
+        return self.info(env.ram)["dead"] and int(env.ram[0x30]) == getattr(self, "_lvl0", 0)
 
     def summary(self, env):
         i = self.info(env.ram)

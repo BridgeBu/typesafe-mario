@@ -1,0 +1,8 @@
+{
+  "game": "thwaite",
+  "rom": "/workspace/jev-plays/roms/thwaite.nes",
+  "policy": "jev",
+  "frames_per_decision": 8,
+  "seconds": 45,
+  "out": "/workspace/reports/jev-plays/trial-thwaite-jev.mp4"
+}

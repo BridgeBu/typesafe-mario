@@ -38,3 +38,35 @@ New game = add an adapter class in `games.py` (options, buttons, read_state, sit
 ## Swap model
 `policies.py`: any class with `choose(state, options, instructions, fallback, situation) -> Decision`.
 `policy: "rule"` = offline stand-in.
+
+---
+## Update 2026-10-17: Mario 1-1 cleared (final pipeline)
+
+**Final:** `jev-plays-mario-1-1.mp4` (1920x1080 H.264 + AAC game audio, 25.6 s) and `.jsonl` (every decision).
+Run: `cd /workspace/jev-plays/pipeline && ../.venv-retro/bin/python -m jevplay.run --model jev-preview --seconds 40 --out OUT.mp4`
+(config.json: game=smb, rom=/workspace/jev-plays/roms/super-mario-bros.nes, title "Jev plays Mario").
+
+- Emulator: stable-retro FCEUmm core (`jevplay/retro_env.py`, nes-py-compatible): video, RAM, multi-slot
+  save-states and APU audio from ONE emulator. Audio captured per emulated frame (previews discarded), so it
+  stays in sync while the game is paused for decisions. (nes-py has no audio; replaying inputs in a second core
+  drifted after ~14 s, so the backend was switched.) `--emulator nes-py` still works without audio.
+- Jev input per decision (one request, `jev-preview` = jev-1.14.0): `state = {"frame": <PNG of the screen,
+  upscaled to 512 px wide>, "ram_facts": {...}}` + header `TypeSafe-Danger-Zone-Images: true`.
+  ram_facts = exact memory values (Mario x/y/speed/on_ground, enemies by type/dx/dy, pits/obstacles from the tile
+  buffer) and **exact emulator previews** (save-state rollouts: does each jump land safely, frames until death if
+  never jumping, run-now-jump-next). Physics stays in code; Jev chooses.
+- Questions: Choice over 7 actions with each option's preview inside its structured criteria (bars + confidence),
+  Noul "must jump now", Noul "immediate danger" (bar coral > 0.9).
+- Jump actions are code-executed macros (A held to the top of the arc; mid-air input stops on touchdown).
+- ROM: from the public PyPI wheel gym-super-mario-bros 9.1.0 (approved for private recording). `roms/` and `*.nes`
+  are gitignored; never committed.
+- `jevplay/clip.py` = zero-API replay renderer (nes-py runs); `jevplay/replay.py` = state reconstruction.
+
+### Image input (docs read: llms.txt, images.md, api.md, models.md, primitives/noul.md, sdk/python changelog
++ types/assets, typesafe-SKILL.md)
+- Dreamer/prototype status; needs header `TypeSafe-Danger-Zone-Images: true`; Jev 1.13 and 1.14 accept images.
+- PNG or JPEG stills; 16 MiB/file; each side 280-1568 px (NES 256x240 must be upscaled); 78,400-2,458,624 px total;
+  32 MiB request. Put an image used by several questions in `state` once (each reference adds it again).
+- Billed as input tokens at normal price ($0.042 / M input tokens, output free). Measured: a 512x480 frame adds
+  ~760 tokens (~1.9k text+image vs ~1.2k text only); full Mario request with previews ~2.4k tokens; latency
+  median ~80 ms, p90 ~120-150 ms.

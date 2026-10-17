@@ -23,20 +23,34 @@ class JevPolicy:
     """TypeSafe Jev via typesafe-sdk, same call shape as typesafe-mario's TypeSafePolicy.
     Reads TYPESAFE_API_KEY from env (TypeSafeClient default)."""
 
-    def __init__(self) -> None:
-        from typesafe_sdk import Choice, Noul, NoulCriteria, TypeSafeClient
+    def __init__(self, model="jev-latest", image_px=512) -> None:
+        self.model, self.image_px = model, image_px
+        from typesafe_sdk import Choice, Image, Noul, NoulCriteria, TypeSafeClient
+        self._Image = Image
         self._Choice, self._Noul, self._NC = Choice, Noul, NoulCriteria
         self._client = TypeSafeClient()
 
-    def choose(self, state, options, instructions, fallback, situation=None):
+    def _frame(self, frame):
+        import io
+        from PIL import Image as P
+        h, w = frame.shape[:2]
+        b = io.BytesIO()  # NES 256x240 is below the 280px minimum: upscale with nearest-neighbour
+        P.fromarray(frame).resize((self.image_px, self.image_px * h // w), P.NEAREST).save(b, "png")
+        return self._Image(b.getvalue())
+
+    def choose(self, state, options, instructions, fallback, situation=None, frame=None):
         t = time.perf_counter()
         try:
+            headers = {}
+            if frame is not None and self.image_px:
+                state = {"frame": self._frame(frame), "ram_facts": state}
+                headers = {"TypeSafe-Danger-Zone-Images": "true"}
             q = {"next_action": self._Choice(instructions=instructions, criteria=options)}
             if situation:
                 for k in ("must_act", "danger"):
                     instr, (yes, no) = situation[k]
                     q[k] = self._Noul(instructions=instr, criteria=self._NC(true=yes, false=no))
-            r = self._client.system_one(model="jev-latest", state=state, questions=q)
+            r = self._client.system_one(model=self.model, state=state, questions=q, extra_headers=headers or None)
             ms = (time.perf_counter() - t) * 1000
             a = r.answers["next_action"]
             u = getattr(r, "usage", None)
@@ -65,7 +79,7 @@ class RulePolicy:
     def __init__(self, heuristic):
         self.heuristic = heuristic
 
-    def choose(self, state, options, instructions, fallback, situation=None):
+    def choose(self, state, options, instructions, fallback, situation=None, frame=None):
         scores = self.heuristic(state, list(options))
         tot = sum(scores.values()) or 1.0
         probs = {k: v / tot for k, v in scores.items()}

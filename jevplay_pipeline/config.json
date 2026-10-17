@@ -1,8 +1,9 @@
 {
-  "game": "thwaite",
-  "rom": "/workspace/jev-plays/roms/thwaite.nes",
+  "game": "smb",
+  "rom": "/workspace/jev-plays/roms/super-mario-bros.nes",
   "policy": "jev",
+  "title": "Jev plays Mario",
   "frames_per_decision": 8,
-  "seconds": 45,
-  "out": "/workspace/reports/jev-plays/trial-thwaite-jev.mp4"
+  "seconds": 90,
+  "out": "/workspace/jev-plays/tmp/smb-try.mp4"
 }

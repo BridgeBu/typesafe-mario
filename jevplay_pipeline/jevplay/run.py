@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse, json, subprocess, time, pathlib, os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from nes_py import NESEnv
 from .games import ADAPTERS
 from .policies import JevPolicy, RulePolicy
 
@@ -86,57 +85,101 @@ def render(game, frame, dec, idx, reward_total, status, cfg):
     return img
 
 
+def _mux_audio(env, out, nframes):
+    """Audio captured per emulated frame (game paused while Jev decides, so it stays in sync). NES runs at
+    60.0988 fps vs 60 fps video: the WAV rate is set so the audio spans exactly the video length."""
+    import wave
+    a = np.concatenate(env.audio).astype(np.int16)
+    rate = int(round(len(a) / (nframes / FPS)))
+    wav = str(out) + ".wav"
+    w = wave.open(wav, "wb"); w.setnchannels(2); w.setsampwidth(2); w.setframerate(rate); w.writeframes(a.tobytes()); w.close()
+    tmp = str(out) + ".tmp.mp4"
+    subprocess.check_call(["ffmpeg", "-y", "-v", "error", "-i", str(out), "-i", wav, "-map", "0:v", "-map", "1:a",
+                           "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", tmp])
+    os.replace(tmp, out); os.remove(wav)
+
+
+def _default_macro(game, action, fpd):
+    b = game.buttons.get(action, 0)
+    for k in range(fpd):
+        yield 0 if (action in game.tap and k >= 2) else b
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(pathlib.Path(__file__).parents[1] / "config.json"))
     ap.add_argument("--game"); ap.add_argument("--rom"); ap.add_argument("--policy")
-    ap.add_argument("--seconds", type=float); ap.add_argument("--out"); ap.add_argument("--title")
+    ap.add_argument("--seconds", type=float); ap.add_argument("--out"); ap.add_argument("--title"); ap.add_argument("--model"); ap.add_argument("--image-px", dest="image_px", type=int)
+    ap.add_argument("--frames-per-decision", dest="frames_per_decision", type=int)
+    ap.add_argument("--no-video", action="store_true"); ap.add_argument("--boot-delay", dest="boot_delay", type=int); ap.add_argument("--stop-on-death", action="store_true")
     a = ap.parse_args(argv)
     cfg = json.loads(pathlib.Path(a.config).read_text())
-    for k in ("game", "rom", "policy", "seconds", "out", "title"):
+    for k in ("game", "rom", "policy", "seconds", "out", "title", "model", "image_px", "frames_per_decision", "boot_delay"):
         if getattr(a, k) is not None:
             cfg[k] = getattr(a, k)
     game = ADAPTERS[cfg["game"]]()
+    game.boot_delay = cfg.get("boot_delay", 0)
     rule = RulePolicy(game.heuristic)
-    pol = JevPolicy() if cfg["policy"] == "jev" else rule
+    pol = JevPolicy(cfg.get("model", "jev-latest"), int(cfg.get("image_px", 512))) if cfg["policy"] == "jev" else rule
     fpd = int(cfg.get("frames_per_decision", 8))
     out = pathlib.Path(cfg["out"]); out.parent.mkdir(parents=True, exist_ok=True)
     log = open(out.with_suffix(".jsonl"), "w")
-    env = NESEnv(cfg["rom"]); env.reset()
+    if cfg.get("emulator", "retro") == "retro":
+        from .retro_env import RetroNES
+        env = RetroNES(cfg["rom"]); env.reset()
+    else:
+        from nes_py import NESEnv
+        env = NESEnv(cfg["rom"]); env.reset()
     frame = game.boot(env)
-    ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+    if hasattr(env, "audio"):
+        env.audio.clear()  # video starts after boot
+    class _Null:
+        def write(self, b): pass
+        def close(self): pass
+    ff = subprocess.Popen(["true"], stdin=subprocess.PIPE) if a.no_video else subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                            "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264",
                            "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                            "-movflags", "+faststart", str(out)], stdin=subprocess.PIPE)
     total = int(cfg["seconds"] * FPS)
     dec, idx, lat, errs, reward_total = None, 0, [], 0, None
     tin = tout = 0
+    prev_btn = 0
     t0 = time.time()
     try:
+        it = iter(())
         for f in range(total):
-            if f % fpd == 0:
+            try:
+                btn = next(it)
+            except StopIteration:
                 state = game.read_state(env, frame)
-                dec = pol.choose(state, game.options, game.instructions, rule, getattr(game, 'situation', None))  # emulator paused here
+                dec = pol.choose(state, game.current_options() if hasattr(game, 'current_options') else game.options, game.instructions, rule, getattr(game, 'situation', None), frame)  # emulator paused here
                 dec._state = state
                 idx += 1; lat.append(dec.latency_ms); errs += bool(dec.error); tin += dec.tokens_in; tout += dec.tokens_out
                 log.write(json.dumps({"frame": f, "state": state, **{k: v for k, v in dec.__dict__.items() if k != "_state"}}, default=str) + "\n")
-            btn = game.buttons.get(dec.action, 0)
-            if dec.action in game.tap and f % fpd >= 2:
-                btn = 0
+                it = game.macro(env, dec.action) if hasattr(game, "macro") else _default_macro(game, dec.action, fpd)
+                btn = next(it, 0)
             frame, *_ = env.step(btn)
             rw = game.reward(env)
             if rw is not None:
                 reward_total = (reward_total or 0.0) + rw
             ended = game.done(env)
-            ff.stdin.write(render(game, frame, dec, idx, reward_total, "end" if ended else "live", cfg).tobytes())
+            if not a.no_video:
+                ff.stdin.write(render(game, frame, dec, idx, reward_total, "end" if ended else "live", cfg).tobytes())
+            if a.stop_on_death and getattr(game, "died", lambda e: False)(env):
+                ended = True
             if ended:
-                for _ in range(FPS):  # hold final frame 1s
+                cleared = getattr(game, "summary", lambda e: {})(env).get("clear")
+                for _ in range(0 if a.no_video else (int(3.5 * FPS) if cleared else FPS)):
+                    if cleared:  # play out the real flagpole slide / castle walk
+                        frame, *_ = env.step(0); f += 1
                     ff.stdin.write(render(game, frame, dec, idx, reward_total, "end", cfg).tobytes())
                 break
     finally:
         ff.stdin.close(); ff.wait(); env.close(); log.close()
+        if not a.no_video and getattr(env, "audio", None):
+            _mux_audio(env, out, f + 1)
         c = getattr(pol, "close", None); c and c()
-    s = {"out": str(out), "decisions": idx, "errors": errs, "wall_s": round(time.time() - t0, 1), "tokens_in": tin, "tokens_out": tout, "video_s": round(f / FPS, 1)}
+    s = {"out": str(out), "decisions": idx, "errors": errs, "wall_s": round(time.time() - t0, 1), "tokens_in": tin, "tokens_out": tout, "video_s": round(f / FPS, 1), **getattr(game, "summary", lambda e: {})(env)}
     if lat:
         L = sorted(lat); s.update(lat_ms_median=round(L[len(L)//2]), lat_ms_p90=round(L[int(len(L)*.9)]),
                                   lat_ms_max=round(L[-1]))

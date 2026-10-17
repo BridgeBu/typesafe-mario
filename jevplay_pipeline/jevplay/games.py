@@ -200,7 +200,10 @@ _orig_init = SuperMarioBros.__init__
 def _smb_init(self):
     _orig_init(self)
     p = _repo_prompts()
-    self.instructions = p["_Choice"]["instructions"]
+    self.instructions = dict(p["_Choice"]["instructions"])
+    self.instructions["inputs"] = ("`frame` (when present) is the live NES screen: Mario, enemies, pipes, "
+                                   "blocks and pits are visible in it. `ram_facts` are exact values read from game "
+                                   "memory; trust them for positions, speeds and timing.")
     self.situation = {
         "must_act": (p["_Noul"]["instructions"],
                      ("A forward jump must begin or stay held now", "No jump is needed this decision")),
@@ -230,3 +233,18 @@ def _smb_raw(self, s):
             f"Terrain    {str(s.get('terrain', {}))[:60]}",
             f"Time       {s.get('episode', {}).get('clock', '?')}"]
 SuperMarioBros.raw_lines = _smb_raw
+
+
+def _smb_died(self, env):
+    return self.info(env.ram)["death"]
+SuperMarioBros.died = _smb_died
+
+
+def _smb_summary(self, env):
+    i = self.info(env.ram)
+    return {"x": i["x_pos"], "clear": i["clear"], "lives": i["life"], "time": i["time"]}
+SuperMarioBros.summary = _smb_summary
+
+from .smb import SMB  # noqa: E402
+ADAPTERS["smb"] = SMB
+ADAPTERS["smb_v1"] = SuperMarioBros

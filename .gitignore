@@ -8,3 +8,7 @@ artifacts/
 .env
 *.nes
 *.rom
+
+# never commit ROMs
+roms/
+*.nes
